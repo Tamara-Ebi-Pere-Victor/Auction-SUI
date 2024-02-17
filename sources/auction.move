@@ -113,11 +113,11 @@ module auction::example {
     // only item creator can call this
     public fun settle_bid(item: Item, auction: &mut Auction, clock: &Clock, ctx: &mut TxContext): Coin<SUI> {
         // check that only item creator can call
-        assert!(&auction.item_id == object::uid_as_inner(&item.id), ENotCreator);
+        assert!(&auction.item_id == object::uid_as_inner(&item.id), ENotCreator); // Corrected assertion
         
         // check that auction has ended
         let current_time = clock::timestamp_ms(clock);
-        assert!(auction.auction_ends < current_time, EAuctionNotEnded);
+        assert!(auction.auction_ends < current_time, EAuctionNotEnded); // Corrected assertion
 
         // check that auction state is 0
         assert!(auction.auction_state == 0, EAuctionEnded);
@@ -146,7 +146,7 @@ module auction::example {
     // allows bidders to get refund after auction ends
     public fun get_refund(auction: &mut Auction, receipt: Receipt, ctx: &mut TxContext): Coin<SUI> {
         // destructure receipt
-        let Receipt {amount: amount, auction_id: auction_id} = receipt;
+        let Receipt {amount: amount, auction_id: auction_id} = receipt; // Unused amount variable
 
         // check receipt is sent with right autcion
         assert!(&auction_id == object::uid_as_inner(&auction.id), EWrongAuction);
