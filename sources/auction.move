@@ -43,7 +43,7 @@ module auction::example {
         amount: u64,
     } 
 
-    public fun list_item(name: vector<u8>, desc: vector<u8>, start_price: u64, clock: &Clock, ctx: &mut TxContext): Item {
+    public fun list_item(name: vector<u8>, desc: vector<u8>, start_price: u64,duration_in_seconds: u64 ,clock: &Clock, ctx: &mut TxContext): Item {
         // create item object, this object is an owned object 
         let item = Item {
             id: object::new(ctx),
@@ -56,9 +56,9 @@ module auction::example {
         // get item id
         let item_id = object::uid_to_inner(&item.id);
 
-        // get current_time : auction duration is set to 20mins (nanoseconds);
+        // get current_time : auction duration is set to duration (nanoseconds);
         let current_time = clock::timestamp_ms(clock);
-        let end_time = current_time + (20 * 60 * 1000);
+        let end_time = current_time + (duration_in_seconds* 1000);
         
         // create item auction, which is shared so can be accessed by anyone
         let auction = Auction {
@@ -80,6 +80,9 @@ module auction::example {
     }
 
     public fun bid(auction: &mut Auction, amount: Coin<SUI>, clock: &Clock, ctx: &mut TxContext): Receipt {
+       // amount is greater than or equal to starting bid
+        assert!(coin::value(&amount) >= auction.starting_bid, EBidTooLow);
+
         // check that auction has not ended
         let current_time = clock::timestamp_ms(clock);
         assert!(auction.auction_ends > current_time, EAuctionEnded);
@@ -87,17 +90,19 @@ module auction::example {
         // check that auction state is 0
         assert!(auction.auction_state == 0, EAuctionEnded);
 
-        // check that the current bid is higher than auction highest bid
         let bid_amount = coin::value(&amount);
-        assert!(bid_amount > auction.highest_bid, EBidTooLow);
+        // assert!(bid_amount > auction.highest_bid, EBidTooLow);
 
         // add the amount to the bid balance
         let coin_balance = coin::into_balance(amount);
         balance::join(&mut auction.bid_balance, coin_balance);
 
-        // set new bid as the highest bid and bidder the highest bidder
-        auction.highest_bid = bid_amount;
-        auction.highest_bidder = option::some(tx_context::sender(ctx));
+        // check that the current bid is higher than auction highest bid
+        if (bid_amount > auction.highest_bid) {
+            // set new bid as the highest bid and bidder the highest bidder
+            auction.highest_bid = bid_amount;
+            auction.highest_bidder = option::some(tx_context::sender(ctx));
+        };
 
         // generate receipt for refund
         let auction_id = object::uid_to_inner(&auction.id);
@@ -145,6 +150,7 @@ module auction::example {
 
     // allows bidders to get refund after auction ends
     public fun get_refund(auction: &mut Auction, receipt: Receipt, ctx: &mut TxContext): Coin<SUI> {
+        
         // destructure receipt
         let Receipt {amount: amount, auction_id: auction_id} = receipt;
 
