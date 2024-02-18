@@ -15,6 +15,7 @@ module auction::example {
     const ENoBidsMade : u64 = 3;
     const ENotCreator: u64 = 4;
     const EWrongAuction: u64 = 5;
+    const EWinnerCannotGetRefund: u64 = 6;
 
     // owned object item
     struct Item has key, store{
@@ -38,7 +39,8 @@ module auction::example {
     }   
 
     // owned object that bidders use to get a refund
-    struct Receipt {
+    struct Receipt has key, store {
+        id: UID,
         auction_id: ID,
         amount: u64,
     } 
@@ -56,9 +58,9 @@ module auction::example {
         // get item id
         let item_id = object::uid_to_inner(&item.id);
 
-        // get current_time : auction duration is set to 20mins (nanoseconds);
+        // get current_time : auction duration is set to 20 ticks;
         let current_time = clock::timestamp_ms(clock);
-        let end_time = current_time + (20 * 60 * 1000);
+        let end_time = current_time + 20;
         
         // create item auction, which is shared so can be accessed by anyone
         let auction = Auction {
@@ -103,6 +105,7 @@ module auction::example {
         let auction_id = object::uid_to_inner(&auction.id);
 
         let receipt = Receipt {
+            id: object::new(ctx),
             auction_id,
             amount: bid_amount,
         };
@@ -146,17 +149,336 @@ module auction::example {
     // allows bidders to get refund after auction ends
     public fun get_refund(auction: &mut Auction, receipt: Receipt, ctx: &mut TxContext): Coin<SUI> {
         // destructure receipt
-        let Receipt {amount: amount, auction_id: auction_id} = receipt;
+        let Receipt {id, amount: amount, auction_id: auction_id} = receipt;
 
-        // check receipt is sent with right autcion
+        // check receipt is sent with right auction
         assert!(&auction_id == object::uid_as_inner(&auction.id), EWrongAuction);
+
+        // check that txn context
+        assert!(!option::contains(&auction.highest_bidder, &tx_context::sender(ctx)), EWinnerCannotGetRefund);
 
         // check that auction state is ended
         assert!(auction.auction_state == 1, EAuctionNotEnded);
+
+        // delete refund object
+        object::delete(id);
 
         // get the coin from the bid balance
         let refund = coin::take(&mut auction.bid_balance, amount, ctx);
 
         refund
     }
+
+    #[test_only] use sui::test_scenario as ts;
+    #[test_only] const SELLER: address = @0x1;
+    #[test_only] const Bidder1: address = @0xA;
+    #[test_only] const Bidder2: address = @0xB;
+
+    #[test]
+    fun test_auction(){
+        let ts = ts::begin(@0x0);
+        let clock = clock::create_for_testing(ts::ctx(&mut ts));
+
+        // Seller lists item
+        {   
+            ts::next_tx(&mut ts, SELLER);
+            
+            // set the item parameters
+            let name = b"antique pocket watch";
+            let desc = b"1988 old man edition watch";
+            let start_price: u64 = 5; // 5 SUI
+            
+            // create item
+            let item = list_item(name, desc, start_price, &clock, ts::ctx(&mut ts));
+            
+            // transfer item to owner
+            transfer::public_transfer(item, SELLER);
+        };
+
+        // First Bid
+        {
+            ts::next_tx(&mut ts, Bidder1);
+            
+            // get auction
+            let auction = ts::take_shared(&ts);
+
+            // mint test tokens
+            let coin = coin::mint_for_testing<SUI>(8, ts::ctx(&mut ts));
+            
+            // call bid and generate receipt
+            let receipt = bid(&mut auction, coin, &clock, ts::ctx(&mut ts));
+
+            // transfer receipt to Bidder1
+            transfer::public_transfer(receipt, Bidder1);
+
+            ts::return_shared(auction);
+        };
+
+        // Second Bid 
+        {
+            ts::next_tx(&mut ts, Bidder2);
+            
+            // get auction
+            let auction = ts::take_shared(&ts);
+
+            // mint test tokens
+            let coin = coin::mint_for_testing<SUI>(14, ts::ctx(&mut ts));
+            
+            // call bid and generate receipt
+            let receipt = bid(&mut auction, coin, &clock, ts::ctx(&mut ts));
+
+            // transfer receipt to Bidder2
+            transfer::public_transfer(receipt, Bidder2);
+
+            ts::return_shared(auction);
+
+        };
+
+        // Max out clock and settle bid
+        {
+            ts::next_tx(&mut ts, SELLER);
+
+            // increment clock to auction end time
+            clock::increment_for_testing(&mut clock, 21);
+
+            // get auction
+            let auction: Auction = ts::take_shared(&ts);
+            
+            // get item
+            let item: Item = ts::take_from_sender(&ts);
+
+
+            // call bid and transfer item to highest bidder
+            let bid_amount = settle_bid(item, &mut auction, &clock, ts::ctx(&mut ts));
+
+            // transfer bid amount to seller
+            transfer::public_transfer(bid_amount, SELLER);
+
+            ts::return_shared(auction);
+        };
+
+        // Bidder1 gets a refund as bidder2 is the highest bidder
+        {
+            ts::next_tx(&mut ts, Bidder1);
+
+            // get auction
+            let auction: Auction = ts::take_shared(&ts);
+            
+            // get receipt
+            let receipt: Receipt = ts::take_from_sender(&ts);
+
+            // get refund coin
+            let refund = get_refund(&mut auction, receipt, ts::ctx(&mut ts));
+
+            // transfer bid amount to seller
+            transfer::public_transfer(refund, Bidder1);
+
+            ts::return_shared(auction);
+        };
+
+        clock::destroy_for_testing(clock);
+        ts::end(ts);
+    }
+
+    #[test]
+    #[expected_failure]
+    fun test_auction_should_reject_bids_if_auction_time_ended(){
+        let ts = ts::begin(@0x0);
+        let clock = clock::create_for_testing(ts::ctx(&mut ts));
+
+        // Seller lists item
+        {   
+            ts::next_tx(&mut ts, SELLER);
+            
+            // set the item parameters
+            let name = b"antique pocket watch";
+            let desc = b"1988 old man edition watch";
+            let start_price: u64 = 5; // 5 SUI
+            
+            // create item
+            let item = list_item(name, desc, start_price, &clock, ts::ctx(&mut ts));
+            
+            // transfer item to owner
+            transfer::public_transfer(item, SELLER);
+        };
+
+        // First bid should fail as it's lower
+        {
+            ts::next_tx(&mut ts, Bidder1);
+
+            // increment clock to auction end time
+            clock::increment_for_testing(&mut clock, 21);
+            
+            // get auction
+            let auction = ts::take_shared(&ts);
+
+            // mint test tokens
+            let coin = coin::mint_for_testing<SUI>(4, ts::ctx(&mut ts));
+            
+            // call bid and generate receipt
+            let receipt = bid(&mut auction, coin, &clock, ts::ctx(&mut ts));
+
+            // transfer receipt to Bidder1
+            transfer::public_transfer(receipt, Bidder1);
+
+            ts::return_shared(auction);
+        };
+
+        clock::destroy_for_testing(clock);
+        ts::end(ts);
+    }
+
+    #[test]
+    #[expected_failure]
+    fun test_auction_should_fail_if_bidder_tries_to_bid_lower_than_starting_price(){
+        let ts = ts::begin(@0x0);
+        let clock = clock::create_for_testing(ts::ctx(&mut ts));
+
+        // Seller lists item
+        {   
+            ts::next_tx(&mut ts, SELLER);
+            
+            // set the item parameters
+            let name = b"antique pocket watch";
+            let desc = b"1988 old man edition watch";
+            let start_price: u64 = 5; // 5 SUI
+            
+            // create item
+            let item = list_item(name, desc, start_price, &clock, ts::ctx(&mut ts));
+            
+            // transfer item to owner
+            transfer::public_transfer(item, SELLER);
+        };
+
+        // First bid should fail as it's lower
+        {
+            ts::next_tx(&mut ts, Bidder1);
+            
+            // get auction
+            let auction = ts::take_shared(&ts);
+
+            // mint test tokens
+            let coin = coin::mint_for_testing<SUI>(4, ts::ctx(&mut ts));
+            
+            // call bid and generate receipt
+            let receipt = bid(&mut auction, coin, &clock, ts::ctx(&mut ts));
+
+            // transfer receipt to Bidder1
+            transfer::public_transfer(receipt, Bidder1);
+
+            ts::return_shared(auction);
+        };
+
+        clock::destroy_for_testing(clock);
+        ts::end(ts);
+    }
+
+
+    #[test]
+    #[expected_failure]
+    fun test_auction_should_fail_if_winner_tries_to_get_refund(){
+        let ts = ts::begin(@0x0);
+        let clock = clock::create_for_testing(ts::ctx(&mut ts));
+
+        // Seller lists item
+        {   
+            ts::next_tx(&mut ts, SELLER);
+            
+            // set the item parameters
+            let name = b"antique pocket watch";
+            let desc = b"1988 old man edition watch";
+            let start_price: u64 = 5; // 5 SUI
+            
+            // create item
+            let item = list_item(name, desc, start_price, &clock, ts::ctx(&mut ts));
+            
+            // transfer item to owner
+            transfer::public_transfer(item, SELLER);
+        };
+
+        // First Bid
+        {
+            ts::next_tx(&mut ts, Bidder1);
+            
+            // get auction
+            let auction = ts::take_shared(&ts);
+
+            // mint test tokens
+            let coin = coin::mint_for_testing<SUI>(8, ts::ctx(&mut ts));
+            
+            // call bid and generate receipt
+            let receipt = bid(&mut auction, coin, &clock, ts::ctx(&mut ts));
+
+            // transfer receipt to Bidder1
+            transfer::public_transfer(receipt, Bidder1);
+
+            ts::return_shared(auction);
+        };
+
+        // Second Bid 
+        {
+            ts::next_tx(&mut ts, Bidder2);
+            
+            // get auction
+            let auction = ts::take_shared(&ts);
+
+            // mint test tokens
+            let coin = coin::mint_for_testing<SUI>(14, ts::ctx(&mut ts));
+            
+            // call bid and generate receipt
+            let receipt = bid(&mut auction, coin, &clock, ts::ctx(&mut ts));
+
+            // transfer receipt to Bidder2
+            transfer::public_transfer(receipt, Bidder2);
+
+            ts::return_shared(auction);
+
+        };
+
+        // Max out clock and settle bid
+        {
+            ts::next_tx(&mut ts, SELLER);
+
+            // increment clock to auction end time
+            clock::increment_for_testing(&mut clock, 21);
+
+            // get auction
+            let auction: Auction = ts::take_shared(&ts);
+            
+            // get item
+            let item: Item = ts::take_from_sender(&ts);
+
+
+            // call bid and transfer item to highest bidder
+            let bid_amount = settle_bid(item, &mut auction, &clock, ts::ctx(&mut ts));
+
+            // transfer bid amount to seller
+            transfer::public_transfer(bid_amount, SELLER);
+
+            ts::return_shared(auction);
+        };
+
+        // Bidder2 to get refund, should fail.
+        {
+            ts::next_tx(&mut ts, Bidder2);
+
+            // get auction
+            let auction: Auction = ts::take_shared(&ts);
+            
+            // get receipt
+            let receipt: Receipt = ts::take_from_sender(&ts);
+
+            // get refund coin
+            let refund = get_refund(&mut auction, receipt, ts::ctx(&mut ts));
+
+            // transfer bid amount to seller
+            transfer::public_transfer(refund, Bidder2);
+
+            ts::return_shared(auction);
+        };
+
+        clock::destroy_for_testing(clock);
+        ts::end(ts);
+    }
+
 }
