@@ -36,3 +36,9 @@ sui move build
 ```
 sui client publish --gas-budget 100000000 --json
 ```
+
+4. **Test:**
+
+```
+sui move test
+```
